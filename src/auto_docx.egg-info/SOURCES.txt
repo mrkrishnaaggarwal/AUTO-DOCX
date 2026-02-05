@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/auto_docx/__init__.py
+src/auto_docx/__main__.py
+src/auto_docx/document.py
+src/auto_docx/executor.py
+src/auto_docx/main.py
+src/auto_docx/notebook_runner.py
+src/auto_docx/runner.py
+src/auto_docx.egg-info/PKG-INFO
+src/auto_docx.egg-info/SOURCES.txt
+src/auto_docx.egg-info/dependency_links.txt
+src/auto_docx.egg-info/entry_points.txt
+src/auto_docx.egg-info/requires.txt
+src/auto_docx.egg-info/top_level.txt

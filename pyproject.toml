@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-docx"
+version = "1.0.1"
+description = "Execute Python scripts and Jupyter notebooks, generating Word documents with output, images, and markdown"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Krishna Aggarwal", email = "krishnaaggarwal@example.com"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Documentation",
+]
+keywords = ["automation", "documentation", "word", "docx", "script", "logging"]
+dependencies = [
+    "python-docx>=0.8.11",
+    "nbformat>=5.9.0",
+    "nbclient>=0.10.0",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "flake8>=6.0",
+]
+
+[project.scripts]
+auto-docx = "auto_docx.main:main"
+
+[project.urls]
+Homepage = "https://github.com/example/auto-docx"
+Documentation = "https://github.com/example/auto-docx#readme"
+Repository = "https://github.com/example/auto-docx"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311", "py312"]

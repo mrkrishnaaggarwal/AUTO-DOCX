@@ -1,0 +1,10 @@
+# Core dependencies
+python-docx>=0.8.11
+nbformat>=5.9.0
+nbclient>=0.10.0
+pillow>=10.0.0
+
+# Development dependencies (optional)
+# pytest>=7.0
+# black>=23.0
+# flake8>=6.0
