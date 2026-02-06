@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-docx"
-version = "1.0.1"
+version = "1.0.5"
 description = "Execute Python scripts and Jupyter notebooks, generating Word documents with output, images, and markdown"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
-    {name = "Krishna Aggarwal", email = "krishnaaggarwal@example.com"}
+    {name = "Krishna Aggarwal", email = "krishnaaggarwal4777@gmail.com"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

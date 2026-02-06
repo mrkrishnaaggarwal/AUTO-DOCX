@@ -1,9 +1,11 @@
 """
 Script execution module.
 
-Handles the execution of Python scripts and notebooks using subprocess and captures their output.
+Handles the execution of Python scripts and notebooks using subprocess
+with interactive support (stdin) and race-condition-free output capturing.
 """
 
+import base64
 import json
 import os
 import re
@@ -11,87 +13,67 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import queue
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, List, Dict, Union
 
+# Protocol Markers
 IMAGE_MARKER_PREFIX = "__AUTO_DOCX_IMAGE__"
-
+MD_START_MARKER = "__AUTO_DOCX_MD_START__"
+MD_END_MARKER = "__AUTO_DOCX_MD_END__"
 
 @dataclass
 class OutputItem:
-    """Represents an output item in order (text or image)."""
-
-    kind: str  # "text" or "image"
+    """Represents an output item in order (text, image, or markdown)."""
+    kind: str  # "text", "image", "markdown"
     content: str
-
 
 @dataclass
 class ExecutionResult:
     """Container for script execution results."""
-    
     stdout: str
     stderr: str
     return_code: int
     script_path: Path
     source_code: str
     success: bool
-    output_items: Optional[list[OutputItem]] = None
+    output_items: Optional[List[OutputItem]] = None
     error_message: Optional[str] = None
     
     @property
     def has_errors(self) -> bool:
-        """Check if execution produced any errors."""
         return bool(self.stderr) or self.return_code != 0
 
-
 class ScriptExecutor:
-    """Executes Python scripts and notebooks and captures their output."""
+    """Executes Python scripts and notebooks interactively."""
     
-    def __init__(self, timeout: int = 300, verbose: bool = False, python_executable: Optional[str] = None, inputs: Optional[list[str]] = None):
-        """
-        Initialize the executor.
-        
-        Args:
-            timeout: Maximum execution time in seconds (default: 300)
-            verbose: Enable verbose output to console
-            python_executable: Path to Python interpreter to use
-            inputs: List of input values for input() prompts in notebooks
-        """
+    def __init__(self, timeout: int = 300, verbose: bool = False, python_executable: Optional[str] = None):
         self.timeout = timeout
         self.verbose = verbose
         self.python_executable = python_executable
-        self.inputs = inputs or []
 
     @staticmethod
-    def discover_envs() -> list[dict[str, str]]:
+    def discover_envs() -> List[Dict[str, str]]:
         """Discover available Python environments on the system."""
-        envs: list[dict[str, str]] = []
+        envs: List[Dict[str, str]] = []
         seen: set[str] = set()
 
         def add_env(name: str, python_path: str, source: str) -> None:
-            if not python_path:
-                return
+            if not python_path: return
             python_path = os.path.abspath(python_path)
             key = python_path.lower()
-            if key in seen:
-                return
+            if key in seen: return
             seen.add(key)
             envs.append({"name": name, "python": python_path, "source": source})
 
-        # Current Python
         add_env("current", sys.executable, "system")
 
-        # Conda environments
         conda = shutil.which("conda")
         if conda:
             try:
-                result = subprocess.run(
-                    [conda, "env", "list", "--json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
+                result = subprocess.run([conda, "env", "list", "--json"], capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
                     data = json.loads(result.stdout or "{}")
                     for env_path in data.get("envs", []):
@@ -99,22 +81,18 @@ class ScriptExecutor:
                         python_path = Path(env_path) / "bin" / "python"
                         if python_path.exists():
                             add_env(env_name, str(python_path), "conda")
-            except Exception:
-                pass
+            except Exception: pass
 
-        # Common virtualenv locations
         for base in [Path.home() / ".virtualenvs", Path.home() / "venvs"]:
             if base.exists() and base.is_dir():
                 for env_dir in base.iterdir():
                     python_path = env_dir / "bin" / "python"
                     if python_path.exists():
                         add_env(env_dir.name, str(python_path), "venv")
-
         return envs
 
     @staticmethod
-    def select_python(env_identifier: str, envs: Iterable[dict[str, str]]) -> Optional[str]:
-        """Select a Python path from discovered environments by name or index."""
+    def select_python(env_identifier: str, envs: Iterable[Dict[str, str]]) -> Optional[str]:
         envs_list = list(envs)
         if env_identifier.isdigit():
             idx = int(env_identifier)
@@ -125,31 +103,11 @@ class ScriptExecutor:
                 return env.get("python")
         return None
     
-    def execute(self, script_path: str | Path) -> ExecutionResult:
-        """
-        Execute a Python script or notebook and capture its output.
-        
-        Args:
-            script_path: Path to the Python script or notebook to execute
-            
-        Returns:
-            ExecutionResult containing stdout, stderr, return code, and metadata
-            
-        Raises:
-            FileNotFoundError: If the script file doesn't exist
-            ValueError: If the file is not a Python script or notebook
-        """
+    def execute(self, script_path: Union[str, Path]) -> ExecutionResult:
         script_path = Path(script_path).resolve()
         
-        # Validate the script path
         if not script_path.exists():
             raise FileNotFoundError(f"Script not found: {script_path}")
-        
-        if not script_path.is_file():
-            raise ValueError(f"Path is not a file: {script_path}")
-        
-        if script_path.suffix.lower() not in {".py", ".ipynb"}:
-            raise ValueError(f"File is not a Python script or notebook: {script_path}")
         
         # Read the source code
         try:
@@ -159,180 +117,258 @@ class ScriptExecutor:
         
         if self.verbose:
             print(f"[INFO] Executing script: {script_path}")
-            print(f"[INFO] Timeout: {self.timeout} seconds")
         
         python_exec = self.python_executable or sys.executable
 
-        # Execute the script or notebook
         try:
+            # Convert Notebooks to Scripts, then run interactively
             if script_path.suffix.lower() == ".ipynb":
-                return self._execute_notebook(script_path, source_code, python_exec, self.inputs)
-            return self._execute_script(script_path, source_code, python_exec)
+                return self._execute_notebook_as_script(script_path, python_exec)
+            else:
+                return self._execute_script_interactive(script_path, source_code, python_exec)
 
-        except subprocess.TimeoutExpired as e:
-            error_msg = f"Execution timed out after {self.timeout} seconds"
-            if self.verbose:
-                print(f"[ERROR] {error_msg}")
-            
-            return ExecutionResult(
-                stdout=e.stdout or "" if hasattr(e, "stdout") else "",
-                stderr=e.stderr or "" if hasattr(e, "stderr") else "",
-                return_code=-1,
-                script_path=script_path,
-                source_code=source_code,
-                success=False,
-                error_message=error_msg,
-            )
-            
         except Exception as e:
-            error_msg = f"Failed to execute: {str(e)}"
-            if self.verbose:
-                print(f"[ERROR] {error_msg}")
-            
+            import traceback
+            traceback.print_exc()
             return ExecutionResult(
-                stdout="",
-                stderr=str(e),
-                return_code=-1,
-                script_path=script_path,
-                source_code=source_code,
-                success=False,
-                error_message=error_msg,
+                stdout="", stderr=str(e), return_code=-1,
+                script_path=script_path, source_code=source_code,
+                success=False, error_message=f"Execution Failed: {str(e)}"
             )
 
-    def _execute_script(self, script_path: Path, source_code: str, python_exec: str) -> ExecutionResult:
-        """Execute a .py script using the image-aware runner."""
-        # Create persistent images directory next to the script
-        persistent_images_dir = script_path.parent / f".{script_path.stem}_images"
-        persistent_images_dir.mkdir(parents=True, exist_ok=True)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            images_dir = Path(tmpdir) / "images"
-            images_dir.mkdir(parents=True, exist_ok=True)
-
-            env = os.environ.copy()
-            project_src = Path(__file__).resolve().parents[1]
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = f"{project_src}{os.pathsep}{existing}" if existing else str(project_src)
-
-            result = subprocess.run(
-                [python_exec, "-m", "auto_docx.runner", str(script_path), str(images_dir)],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=script_path.parent,
-                env=env,
-            )
-
-            if self.verbose:
-                print(f"[INFO] Execution completed with return code: {result.returncode}")
-
-            # Copy images to persistent location
-            output_items = self._parse_output_with_images(result.stdout, images_dir)
-            output_items = self._copy_images_to_persistent(output_items, persistent_images_dir)
-
-            return ExecutionResult(
-                stdout=result.stdout,
-                stderr=result.stderr,
-                return_code=result.returncode,
-                script_path=script_path,
-                source_code=source_code,
-                success=result.returncode == 0,
-                output_items=output_items,
-            )
-
-    def _execute_notebook(self, notebook_path: Path, source_code: str, python_exec: str, inputs: list[str]) -> ExecutionResult:
-        """Execute a .ipynb notebook using the notebook runner."""
-        # Create persistent images directory next to the notebook
+    def _execute_notebook_as_script(self, notebook_path: Path, python_exec: str) -> ExecutionResult:
+        """Convert notebook to script (including Markdown cells) and execute interactively."""
         persistent_images_dir = notebook_path.parent / f".{notebook_path.stem}_images"
         persistent_images_dir.mkdir(parents=True, exist_ok=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            images_dir = Path(tmpdir) / "images"
-            images_dir.mkdir(parents=True, exist_ok=True)
-            output_json = Path(tmpdir) / "output.json"
+            temp_script_path = Path(tmpdir) / "temp_nb_exec.py"
+            
+            # Convert .ipynb to .py
+            try:
+                import nbformat
+                nb = nbformat.read(notebook_path, as_version=4)
+                
+                converted_lines = ["import base64", ""]
+                source_code_display = [] 
 
-            env = os.environ.copy()
-            project_src = Path(__file__).resolve().parents[1]
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = f"{project_src}{os.pathsep}{existing}" if existing else str(project_src)
+                for cell in nb.cells:
+                    if cell.cell_type == 'code':
+                        converted_lines.append(f"# %% [Code]\n{cell.source}\n")
+                        source_code_display.append(cell.source)
+                    elif cell.cell_type == 'markdown':
+                        md_content = cell.source
+                        b64_content = base64.b64encode(md_content.encode('utf-8')).decode('utf-8')
+                        
+                        injector_code = (
+                            f"print('{MD_START_MARKER}')\n"
+                            f"print(base64.b64decode('{b64_content}').decode('utf-8'))\n"
+                            f"print('{MD_END_MARKER}')\n"
+                        )
+                        converted_lines.append(f"# %% [Markdown]\n{injector_code}")
 
-            # Pass inputs as additional arguments
-            cmd = [
-                python_exec,
-                "-m",
-                "auto_docx.notebook_runner",
-                str(notebook_path),
-                str(output_json),
-                str(images_dir),
-                str(self.timeout),
-            ] + inputs
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=notebook_path.parent,
-                env=env,
-            )
-
-            if self.verbose:
-                print(f"[INFO] Notebook execution return code: {result.returncode}")
-
-            if output_json.exists():
-                data = json.loads(output_json.read_text(encoding="utf-8"))
-                output_items = [OutputItem(**item) for item in data.get("output_items", [])]
-                # Copy images to persistent location
-                output_items = self._copy_images_to_persistent(output_items, persistent_images_dir)
-                notebook_source = data.get("source_code", source_code)
+                converted_source = "\n".join(converted_lines)
+                temp_script_path.write_text(converted_source, encoding='utf-8')
+                
+                clean_source_code = "\n\n".join(source_code_display)
+                
+            except Exception as e:
                 return ExecutionResult(
-                    stdout=data.get("stdout", ""),
-                    stderr=data.get("stderr", ""),
-                    return_code=data.get("return_code", result.returncode),
-                    script_path=notebook_path,
-                    source_code=notebook_source,
-                    success=result.returncode == 0,
-                    output_items=output_items,
-                    error_message=data.get("error_message"),
+                    stdout="", stderr=str(e), return_code=1,
+                    script_path=notebook_path, source_code="", success=False,
+                    error_message=f"Failed to parse notebook: {e}"
                 )
 
-            return ExecutionResult(
-                stdout=result.stdout,
-                stderr=result.stderr,
-                return_code=result.returncode,
-                script_path=notebook_path,
-                source_code=source_code,
-                success=result.returncode == 0,
-                error_message="Notebook runner did not produce output.",
-            )
+            result = self._execute_script_interactive(temp_script_path, converted_source, python_exec)
 
-    def _parse_output_with_images(self, stdout: str, images_dir: Path) -> list[OutputItem]:
-        """Parse stdout and split into text and image items based on markers."""
-        items: list[OutputItem] = []
-        buffer: list[str] = []
-        pattern = re.compile(rf"^{re.escape(IMAGE_MARKER_PREFIX)}:(.+)$")
+            result.script_path = notebook_path
+            result.source_code = clean_source_code
+            
+            final_items = []
+            if result.output_items:
+                for item in result.output_items:
+                    if item.kind == 'image':
+                        src = Path(item.content)
+                        if src.exists():
+                            dst = persistent_images_dir / src.name
+                            shutil.copy2(src, dst)
+                            final_items.append(OutputItem('image', str(dst)))
+                    else:
+                        final_items.append(item)
+            
+            result.output_items = final_items
+            return result
 
-        for line in stdout.splitlines():
-            match = pattern.match(line.strip())
-            if match:
+    def _execute_script_interactive(self, script_path: Path, source_code: str, python_exec: str) -> ExecutionResult:
+        """
+        Execute a .py script using Popen + Threading for interactivity.
+        """
+        temp_dir_obj = tempfile.TemporaryDirectory()
+        temp_dir = Path(temp_dir_obj.name)
+        images_dir = temp_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        project_src = Path(__file__).resolve().parents[1]
+        env["PYTHONPATH"] = f"{project_src}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+        cmd = [python_exec, "-u", "-m", "auto_docx.runner", str(script_path), str(images_dir)]
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=sys.stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, 
+            text=True,
+            cwd=script_path.parent,
+            env=env,
+            bufsize=0
+        )
+
+        out_queue = queue.Queue()
+
+        def stream_reader(pipe):
+            """
+            Reads output char-by-char.
+            Filters protocol markers (Markdown/Images) from the Terminal output,
+            but captures everything for the Document generation.
+            """
+            buffer = ""
+            hiding_markdown = False
+            markers = [MD_START_MARKER, MD_END_MARKER, IMAGE_MARKER_PREFIX]
+
+            while True:
+                char = pipe.read(1)
+                if not char:
+                    break
+                
+                # 1. Capture for Document (Always)
+                out_queue.put(char)
+                
+                # 2. Terminal Output Logic (Filtering)
+                buffer += char
+                
+                # Handling inside Markdown Block
+                if hiding_markdown:
+                    if MD_END_MARKER in buffer:
+                        hiding_markdown = False
+                        buffer = "" # Consumed marker
+                    elif char == '\n':
+                        buffer = "" # Clear line buffer
+                    continue
+
+                # Detect Start of Markdown
+                if MD_START_MARKER in buffer:
+                    hiding_markdown = True
+                    buffer = "" # Consumed marker
+                    continue
+
+                # Detect Image Marker (Single line suppress)
+                if IMAGE_MARKER_PREFIX in buffer:
+                    if char == '\n':
+                        buffer = "" # Consumed line
+                    continue
+                
+                # Intelligent Flushing
+                # If buffer starts with part of a marker (e.g. "_", "__", "__A"), hold it.
+                # Otherwise, print it.
+                is_partial_match = False
+                for m in markers:
+                    if m.startswith(buffer):
+                        is_partial_match = True
+                        break
+                
+                if is_partial_match:
+                    continue # Hold
+                else:
+                    # Safe to print
+                    sys.stdout.write(buffer)
+                    sys.stdout.flush()
+                    buffer = ""
+
+        t_out = threading.Thread(target=stream_reader, args=(process.stdout,))
+        t_out.start()
+
+        try:
+            process.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            if self.verbose:
+                print(f"\n[ERROR] Timeout after {self.timeout}s")
+        
+        t_out.join()
+
+        full_output = ""
+        while not out_queue.empty():
+            full_output += out_queue.get()
+
+        output_items = self._parse_output_stream(full_output, images_dir)
+
+        persistent_images_dir = script_path.parent / f".{script_path.stem}_images"
+        persistent_images_dir.mkdir(parents=True, exist_ok=True)
+        
+        final_items = self._copy_images_to_persistent(output_items, persistent_images_dir)
+        
+        temp_dir_obj.cleanup()
+
+        return ExecutionResult(
+            stdout=full_output, 
+            stderr="",          
+            return_code=process.returncode,
+            script_path=script_path,
+            source_code=source_code,
+            success=process.returncode == 0,
+            output_items=final_items
+        )
+
+    def _parse_output_stream(self, stdout: str, images_dir: Path) -> List[OutputItem]:
+        """Parses interleaved text, images, and markdown markers."""
+        items: List[OutputItem] = []
+        buffer: List[str] = []
+        
+        lines = stdout.splitlines()
+        state = "NORMAL" 
+        
+        for line in lines:
+            if MD_START_MARKER in line:
                 if buffer:
                     items.append(OutputItem(kind="text", content="\n".join(buffer)))
                     buffer = []
-                image_path = match.group(1).strip()
+                state = "IN_MARKDOWN"
+                continue
+            
+            if MD_END_MARKER in line:
+                if buffer:
+                    items.append(OutputItem(kind="markdown", content="\n".join(buffer)))
+                    buffer = []
+                state = "NORMAL"
+                continue
+            
+            if state == "NORMAL" and IMAGE_MARKER_PREFIX in line:
+                parts = line.split(f"{IMAGE_MARKER_PREFIX}:")
+                if parts[0].strip():
+                    buffer.append(parts[0])
+                
+                if buffer:
+                    items.append(OutputItem(kind="text", content="\n".join(buffer)))
+                    buffer = []
+                
+                image_path = parts[1].strip()
                 if not os.path.isabs(image_path):
                     image_path = str(images_dir / image_path)
                 items.append(OutputItem(kind="image", content=image_path))
-            else:
-                buffer.append(line)
+                continue
+            
+            buffer.append(line)
 
         if buffer:
-            items.append(OutputItem(kind="text", content="\n".join(buffer)))
+            kind = "markdown" if state == "IN_MARKDOWN" else "text"
+            items.append(OutputItem(kind=kind, content="\n".join(buffer)))
 
         return items
 
-    def _copy_images_to_persistent(self, items: list[OutputItem], persistent_dir: Path) -> list[OutputItem]:
-        """Copy images from temp directory to persistent location and update paths."""
-        new_items: list[OutputItem] = []
+    def _copy_images_to_persistent(self, items: List[OutputItem], persistent_dir: Path) -> List[OutputItem]:
+        new_items: List[OutputItem] = []
         img_counter = 0
 
         for item in items:
@@ -344,9 +380,7 @@ class ScriptExecutor:
                     shutil.copy2(src_path, dst_path)
                     new_items.append(OutputItem(kind="image", content=str(dst_path)))
                 else:
-                    # Image doesn't exist, skip or keep original
                     new_items.append(item)
             else:
                 new_items.append(item)
-
         return new_items

@@ -1,1 +1,4 @@
-dist
+dist/
+build/
+src/auto_docx.egg-info/
+src/auto_docx/__pycache__/

@@ -1,2 +1,0 @@
-[console_scripts]
-auto-docx = auto_docx.main:main

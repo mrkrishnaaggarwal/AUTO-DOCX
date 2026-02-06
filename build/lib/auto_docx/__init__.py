@@ -7,8 +7,8 @@ This package provides functionality to:
 - Generate formatted Word documents with the results
 """
 
-__version__ = "1.0.0"
-__author__ = "Developer"
+__version__ = "1.0.5"
+__author__ = "Krishna Aggarwal"
 
 from .executor import ScriptExecutor, ExecutionResult
 from .document import DocumentGenerator
